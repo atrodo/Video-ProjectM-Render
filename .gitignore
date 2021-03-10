@@ -1,0 +1,12 @@
+.build
+Makefile
+pm_to_blib
+MYMETA.*
+!META.json
+/.prove
+/local*
+/blib/
+tmp*
+*.sw[po]
+external/
+_Inline/
