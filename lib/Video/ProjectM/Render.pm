@@ -72,7 +72,7 @@ has _vizual => (
 sub _trigger_vars
 {
   my $self = shift;
-  $self->clear__vizual;
+  $self->_clear_vizual;
 }
 
 sub _build__vizual
@@ -127,10 +127,8 @@ sub render
 
   if (!blessed $self)
   {
-    $self = $self->new(@new_options);
+    $self = $self->new(@new_options, vars => $vars);
   }
-
-  my $sample_rate = $self->sample_rate;
 
   open my $bgc_fh, '+>', undef;
 
@@ -198,12 +196,57 @@ sub render
   return $bgc_fh;
 }
 
+sub as_psgi
+{
+  require Plack::Builder;
+  require Plack::Request;
+  require Plack::Response;
+  my $app = sub {
+    my $env = shift;
+    my $req = Plack::Request->new($env);
+    my $res = Plack::Response->new(500);
+
+    try {
+      my %vars = $req->parameters->%*;
+      my $pcm    = delete $vars{pcm};
+      my $preset = delete $vars{preset};
+
+      if (!$pcm && $req->upload('pcm') )
+      {
+        open my $fh, '<', $req->upload('pcm')->path;
+        $pcm = do { local $/; <$fh> };
+      }
+
+      if (!$preset && $req->upload('preset') )
+      {
+        open my $fh, '<', $req->upload('preset')->path;
+        $preset = do { local $/; <$fh> };
+      }
+
+      my $pmr = Video::ProjectM::Render->new(
+        preset => $preset,
+        frame_rate => delete $vars{frame_rate},
+        fps => delete $vars{fps},
+        xw => delete $vars{xw},
+        yh => delete $vars{yh},
+        vars => delete $vars{vars} // \%vars,
+      );
+      $res = [ 200, [ 'Content-Type' => 'image/png' ], $pmr->new_stream($pcm) ];
+    }catch{
+      warn $_;
+      $res->body('Error: ' . $_);
+      $res = $res->finalize;
+    };
+
+    return $res;
+  };
+}
+
 package Video::ProjectM::Render::Stream
 {
   use Moo;
   use Types::Standard qw/Num Int Str InstanceOf/;
 
-  use autodie;
   use File::Temp qw/tempdir/;
 
   use namespace::clean;
@@ -260,7 +303,7 @@ package Video::ProjectM::Render::Stream
     return int($duration * $fps);
   }
 
-  sub getline
+  sub png_frame
   {
     my $self = shift;
 
@@ -304,7 +347,8 @@ package Video::ProjectM::Render::Stream
     return $v->png_frame;
   }
 
-  no warnings qw/prototype redefine/;
+  *getline = \&png_frame;
+
   sub close
   {
     my $self = shift;
@@ -459,20 +503,8 @@ SV* Viszul::png_frame()
   img.format = PNG_FORMAT_BGR;
 
   void *png_buffer = NULL;
-  png_alloc_size_t png_len;
-
-  int res = png_image_write_to_memory(
-    &img, png_buffer, &png_len,
-    0,        // convert_to_8_bit
-    buffer,
-    -PNG_IMAGE_ROW_STRIDE(img),       // row_stride
-    NULL      // colormap
-  );
-
-  if ( img.warning_or_error & 3 )
-  {
-    croak("Could not find size of png: %s", img.message);
-  }
+  png_alloc_size_t png_len = xw * yh * 8;
+  int res;
 
   png_buffer = malloc(png_len);
   res = png_image_write_to_memory(
