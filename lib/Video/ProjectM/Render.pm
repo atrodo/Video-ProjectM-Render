@@ -11,7 +11,7 @@ use Scalar::Util qw/blessed/;
 use List::Util qw/first max min/;
 use Time::HiRes qw/time/;
 
-use Types::Standard qw/Num Int Str/;
+use Types::Standard qw/Num Int Str HashRef InstanceOf/;
 
 use namespace::clean;
 
@@ -39,6 +39,13 @@ has preset => (
   required => 1,
 );
 
+has vars => (
+  is => 'rw',
+  isa => HashRef,
+  default => sub { {} },
+  trigger => 1,
+);
+
 has xw => (
   is => 'ro',
   isa => Num,
@@ -50,6 +57,66 @@ has yh => (
   isa => Num,
   default => 360,
 );
+
+has tempdir => (
+  is => 'ro',
+  default => sub { tempdir },
+);
+
+has _vizual => (
+  is => 'lazy',
+  isa => InstanceOf['Video::ProjectM::Render::Viszul'],
+  clearer => 1,
+);
+
+sub _trigger_vars
+{
+  my $self = shift;
+  $self->clear__vizual;
+}
+
+sub _build__vizual
+{
+  my $self = shift;
+  my $vars = $self->vars;
+  my $tempdir = $self->tempdir;
+
+  my $config = join("\n",
+    "Mesh X  = 220",                   # Width of PerPixel Equation mesh
+    "Mesh Y  = 125",                   # Height of PerPixel Equation mesh
+    "FPS  = 35",
+    "Fullscreen  = false",
+    "Window Width  = 512",
+    "Window Height = 512",
+    "Easter Egg Parameter = 1",
+
+    "Hard Cut Sensitivity = 10",
+    "Aspect Correction = true",
+
+    "Preset Path = $tempdir",
+    "Title Font = Vera.ttf",
+    "Menu Font = VeraMono.ttf",
+  );
+
+  open my $config_fh, '>', "$tempdir/config";
+  $config_fh->print($config);
+  open my $viz_fh, '>', "$tempdir/viz.milk";
+  my $dotmilk = $self->preset;
+  $dotmilk =~ s/{(\w+)}/$vars->{$1}/ge;
+  $viz_fh->print($dotmilk);
+
+  my $v = Video::ProjectM::Render::Viszul->new("$tempdir/config", "viz.milk", $self->xw, $self->yh, $self->frame_rate);
+
+  return $v;
+}
+
+sub new_stream
+{
+  my $self = shift;
+  my $pcm_data = shift;
+
+  return Video::ProjectM::Render::Stream->new( VPR => $self, pcm => $pcm_data );
+}
 
 sub render
 {
@@ -131,6 +198,121 @@ sub render
   return $bgc_fh;
 }
 
+package Video::ProjectM::Render::Stream
+{
+  use Moo;
+  use Types::Standard qw/Num Int Str InstanceOf/;
+
+  use autodie;
+  use File::Temp qw/tempdir/;
+
+  use namespace::clean;
+
+  has VPR => (
+    is => 'ro',
+    isa => InstanceOf['Video::ProjectM::Render'],
+    required => 1,
+  );
+
+  has pcm => (
+    is => 'ro',
+    isa => Str,
+    required => 1,
+  );
+
+  has _frame => (
+    is => 'rwp',
+    isa => Int,
+    default => 0,
+  );
+
+  has _iframe => (
+    is => 'rwp',
+    isa => Int,
+    default => 0,
+  );
+
+  has _max_frames => (
+    is => 'lazy',
+    isa => Int,
+  );
+
+  has _max_iframes => (
+    is => 'lazy',
+    isa => Int,
+  );
+
+  sub _build__max_frames
+  {
+    my $self = shift;
+    my $pcm = $self->pcm;
+    my $duration = ( length($pcm) / 2) / $self->VPR->sample_rate;
+    my $frame_rate = $self->VPR->frame_rate;
+    return int($duration * $frame_rate);
+  }
+
+  sub _build__max_iframes
+  {
+    my $self = shift;
+    my $pcm = $self->pcm;
+    my $duration = ( length($pcm) / 2) / $self->VPR->sample_rate;
+    my $fps = $self->VPR->fps;
+    return int($duration * $fps);
+  }
+
+  sub getline
+  {
+    my $self = shift;
+
+    my $vpr = $self->VPR;
+    my $v = $vpr->_vizual;
+
+    my $pcm = $self->pcm;
+    my $frame = $self->_frame;
+    my $iframe = $self->_iframe;
+    my $fps = $vpr->fps;
+    my $afactor = $vpr->sample_rate / $vpr->frame_rate;
+    my $vfactor = $vpr->frame_rate / $fps;
+    my $total_iframes = $self->_max_iframes;
+
+    return
+      if $frame >= $self->_max_frames;
+
+    $v->pcm(substr $pcm, int($afactor * $frame), int($afactor));
+
+    while ( $iframe < $total_iframes )
+    {
+      my $s = $iframe / $fps;
+      warn("$s\t$iframe\t$total_iframes\n");
+
+      $v->render($s);
+      if ( int($iframe * $vfactor) != int(($iframe-1) * $vfactor) )
+      {
+        #$frame++;
+        #$result = $v->png_frame;
+        #$v->pcm(substr $pcm, int($afactor * $frame), int($afactor));
+        last;
+      }
+    }
+    continue
+    {
+      $iframe++;
+    }
+
+    $self->_set__frame(++$frame);
+    $self->_set__iframe(++$iframe);
+    return $v->png_frame;
+  }
+
+  no warnings qw/prototype redefine/;
+  sub close
+  {
+    my $self = shift;
+    $self->_set__frame($self->_max_frames);
+    return;
+  }
+};
+
 use Config;
 
 use Inline CPP => Config => ccflags => ''
@@ -178,6 +360,7 @@ class Viszul
     Viszul(const char* config_file, char* preset, int xw, int yh, int fps = 30);
     void pcm(SV* pcm_sv);
     void render(double time);
+    SV* png_frame();
     void save(FILE* fh);
     std::string preset;
     ~Viszul();
@@ -262,7 +445,52 @@ void Viszul::render(double time)
 
   timekeeper->fixed_time = time;
   pm->renderFrame();
+}
 
+SV* Viszul::png_frame()
+{
+  png_image img;
+  memset(&img, 0, sizeof(img));
+
+  img.version = PNG_IMAGE_VERSION;
+  img.opaque = NULL;
+  img.width = xw;
+  img.height = yh;
+  img.format = PNG_FORMAT_BGR;
+
+  void *png_buffer = NULL;
+  png_alloc_size_t png_len;
+
+  int res = png_image_write_to_memory(
+    &img, png_buffer, &png_len,
+    0,        // convert_to_8_bit
+    buffer,
+    -PNG_IMAGE_ROW_STRIDE(img),       // row_stride
+    NULL      // colormap
+  );
+
+  if ( img.warning_or_error & 3 )
+  {
+    croak("Could not find size of png: %s", img.message);
+  }
+
+  png_buffer = malloc(png_len);
+  res = png_image_write_to_memory(
+    &img, png_buffer, &png_len,
+    0,        // convert_to_8_bit
+    buffer,
+    -PNG_IMAGE_ROW_STRIDE(img),       // row_stride
+    NULL      // colormap
+  );
+
+  if ( img.warning_or_error & 3 )
+  {
+    croak("Could not find size of png: %s", img.message);
+  }
+
+  SV* result = newSVpv((char*)png_buffer, png_len);
+  free(png_buffer);
+  return result;
 }
 
 void Viszul::save(FILE* fh)
@@ -292,10 +520,10 @@ void Viszul::save(FILE* fh)
 
 Viszul::~Viszul()
 {
-  delete(pm);
   glFinish();
   OSMesaDestroyContext( ctx );
   free(buffer);
+  delete(pm);
 }
 
 EOC
