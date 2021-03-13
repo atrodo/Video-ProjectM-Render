@@ -16,56 +16,56 @@ use Types::Standard qw/Num Int Str HashRef InstanceOf/;
 use namespace::clean;
 
 has sample_rate => (
-  is => 'ro',
-  isa => Int,
+  is      => 'ro',
+  isa     => Int,
   default => 44_100,
 );
 
 has fps => (
-  is => 'ro',
-  isa => Int,
+  is      => 'ro',
+  isa     => Int,
   default => 120,
 );
 
 has frame_rate => (
-  is => 'ro',
-  isa => Int,
+  is      => 'ro',
+  isa     => Int,
   default => 30,
 );
 
 has preset => (
-  is => 'ro',
-  isa => Str,
+  is       => 'ro',
+  isa      => Str,
   required => 1,
 );
 
 has vars => (
-  is => 'rw',
-  isa => HashRef,
+  is      => 'rw',
+  isa     => HashRef,
   default => sub { {} },
   trigger => 1,
 );
 
 has xw => (
-  is => 'ro',
-  isa => Num,
+  is      => 'ro',
+  isa     => Num,
   default => 640,
 );
 
 has yh => (
-  is => 'ro',
-  isa => Num,
+  is      => 'ro',
+  isa     => Num,
   default => 360,
 );
 
 has tempdir => (
   is => 'ro',
-  default => sub { tempdir },
+  default => sub {tempdir},
 );
 
 has _vizual => (
-  is => 'lazy',
-  isa => InstanceOf['Video::ProjectM::Render::Viszul'],
+  is      => 'lazy',
+  isa     => InstanceOf ['Video::ProjectM::Render::Viszul'],
   clearer => 1,
 );
 
@@ -77,13 +77,14 @@ sub _trigger_vars
 
 sub _build__vizual
 {
-  my $self = shift;
-  my $vars = $self->vars;
+  my $self    = shift;
+  my $vars    = $self->vars;
   my $tempdir = $self->tempdir;
 
-  my $config = join("\n",
-    "Mesh X  = 220",                   # Width of PerPixel Equation mesh
-    "Mesh Y  = 125",                   # Height of PerPixel Equation mesh
+  my $config = join(
+    "\n",
+    "Mesh X  = 220",    # Width of PerPixel Equation mesh
+    "Mesh Y  = 125",    # Height of PerPixel Equation mesh
     "FPS  = 35",
     "Fullscreen  = false",
     "Window Width  = 512",
@@ -98,44 +99,53 @@ sub _build__vizual
     "Menu Font = VeraMono.ttf",
   );
 
-  open my $config_fh, '>', "$tempdir/config";
-  $config_fh->print($config);
-  open my $viz_fh, '>', "$tempdir/viz.milk";
-  my $dotmilk = $self->preset;
-  $dotmilk =~ s/{(\w+)}/$vars->{$1}/ge;
-  $viz_fh->print($dotmilk);
+  {
+    open my $config_fh, '>', "$tempdir/config";
+    $config_fh->print($config);
+    open my $viz_fh, '>', "$tempdir/viz.milk";
+    my $dotmilk = $self->preset;
+    $dotmilk =~ s/{(\w+)}/$vars->{$1}/ge;
+    $viz_fh->print($dotmilk);
+  }
 
-  my $v = Video::ProjectM::Render::Viszul->new("$tempdir/config", "viz.milk", $self->xw, $self->yh, $self->frame_rate);
+  my $v = Video::ProjectM::Render::Viszul->new(
+    "$tempdir/config", "viz.milk",
+    $self->xw, $self->yh, $self->frame_rate
+  );
 
   return $v;
 }
 
 sub new_stream
 {
-  my $self = shift;
+  my $self     = shift;
   my $pcm_data = shift;
 
-  return Video::ProjectM::Render::Stream->new( VPR => $self, pcm => $pcm_data );
+  return Video::ProjectM::Render::Stream->new(
+    VPR => $self,
+    pcm => $pcm_data
+  );
 }
 
 sub render
 {
-  my $self = shift;
-  my $pcm_data = shift;
-  my $vars = shift // {};
+  my $self        = shift;
+  my $pcm_data    = shift;
+  my $vars        = shift // {};
   my @new_options = @_;
 
-  if (!blessed $self)
+  if ( !blessed $self)
   {
-    $self = $self->new(@new_options, vars => $vars);
+    $self = $self->new( @new_options, vars => $vars );
   }
 
   open my $bgc_fh, '+>', undef;
 
   my $tempdir = tempdir;
-  my $config = join("\n",
-    "Mesh X  = 220",                   # Width of PerPixel Equation mesh
-    "Mesh Y  = 125",                   # Height of PerPixel Equation mesh
+  my $config  = join(
+    "\n",
+    "Mesh X  = 220",    # Width of PerPixel Equation mesh
+    "Mesh Y  = 125",    # Height of PerPixel Equation mesh
     "FPS  = 35",
     "Fullscreen  = false",
     "Window Width  = 512",
@@ -161,17 +171,20 @@ sub render
     mkdir "$tempdir/textures";
   }
 
-  my $v = Video::ProjectM::Render::Viszul->new("$tempdir/config", "viz.milk", $self->xw, $self->yh, $self->frame_rate);
+  my $v = Video::ProjectM::Render::Viszul->new(
+    "$tempdir/config", "viz.milk",
+    $self->xw, $self->yh, $self->frame_rate
+  );
 
-  my $frame = 0;
-  my $iframe = 0;
-  my $fps = $self->fps;
-  my $afactor = $self->sample_rate / $self->frame_rate;
-  my $vfactor = $self->frame_rate / $fps;
-  my $duration = ( length($pcm_data) / 2) / $self->sample_rate;
-  my $total_iframes = int($duration * $fps);
+  my $frame         = 0;
+  my $iframe        = 0;
+  my $fps           = $self->fps;
+  my $afactor       = $self->sample_rate / $self->frame_rate;
+  my $vfactor       = $self->frame_rate / $fps;
+  my $duration      = ( length($pcm_data) / 2 ) / $self->sample_rate;
+  my $total_iframes = int( $duration * $fps );
 
-  $v->pcm(substr $pcm_data, int($afactor * $frame), int($afactor));
+  $v->pcm( substr $pcm_data, int( $afactor * $frame ), int($afactor) );
 
   while ( $iframe < $total_iframes )
   {
@@ -179,11 +192,11 @@ sub render
     warn("$s\t$iframe\t$total_iframes\n");
 
     $v->render($s);
-    if ( int($iframe * $vfactor) != int(($iframe-1) * $vfactor) )
+    if ( int( $iframe * $vfactor ) != int( ( $iframe - 1 ) * $vfactor ) )
     {
       $frame++;
       $v->save($bgc_fh);
-      $v->pcm(substr $pcm_data, int($afactor * $frame), int($afactor));
+      $v->pcm( substr $pcm_data, int( $afactor * $frame ), int($afactor) );
     }
   }
   continue
@@ -201,40 +214,47 @@ sub as_psgi
   require Plack::Builder;
   require Plack::Request;
   require Plack::Response;
-  my $app = sub {
+  my $app = sub
+  {
     my $env = shift;
     my $req = Plack::Request->new($env);
     my $res = Plack::Response->new(500);
 
-    try {
-      my %vars = $req->parameters->%*;
+    try
+    {
+      my %vars   = $req->parameters->%*;
       my $pcm    = delete $vars{pcm};
       my $preset = delete $vars{preset};
 
-      if (!$pcm && $req->upload('pcm') )
+      if ( !$pcm && $req->upload('pcm') )
       {
         open my $fh, '<', $req->upload('pcm')->path;
         $pcm = do { local $/; <$fh> };
       }
 
-      if (!$preset && $req->upload('preset') )
+      if ( !$preset && $req->upload('preset') )
       {
         open my $fh, '<', $req->upload('preset')->path;
         $preset = do { local $/; <$fh> };
       }
 
       my $pmr = Video::ProjectM::Render->new(
-        preset => $preset,
+        preset     => $preset,
         frame_rate => delete $vars{frame_rate},
-        fps => delete $vars{fps},
-        xw => delete $vars{xw},
-        yh => delete $vars{yh},
-        vars => delete $vars{vars} // \%vars,
+        fps        => delete $vars{fps},
+        xw         => delete $vars{xw},
+        yh         => delete $vars{yh},
+        vars       => delete $vars{vars} // \%vars,
       );
-      $res = [ 200, [ 'Content-Type' => 'image/png' ], $pmr->new_stream($pcm) ];
-    }catch{
+      $res = [
+        200, [ 'Content-Type' => 'image/png' ],
+        $pmr->new_stream($pcm)
+      ];
+    }
+    catch
+    {
       warn $_;
-      $res->body('Error: ' . $_);
+      $res->body( 'Error: ' . $_ );
       $res = $res->finalize;
     };
 
@@ -252,55 +272,55 @@ package Video::ProjectM::Render::Stream
   use namespace::clean;
 
   has VPR => (
-    is => 'ro',
-    isa => InstanceOf['Video::ProjectM::Render'],
+    is       => 'ro',
+    isa      => InstanceOf ['Video::ProjectM::Render'],
     required => 1,
   );
 
   has pcm => (
-    is => 'ro',
-    isa => Str,
+    is       => 'ro',
+    isa      => Str,
     required => 1,
   );
 
   has _frame => (
-    is => 'rwp',
-    isa => Int,
+    is      => 'rwp',
+    isa     => Int,
     default => 0,
   );
 
   has _iframe => (
-    is => 'rwp',
-    isa => Int,
+    is      => 'rwp',
+    isa     => Int,
     default => 0,
   );
 
   has _max_frames => (
-    is => 'lazy',
+    is  => 'lazy',
     isa => Int,
   );
 
   has _max_iframes => (
-    is => 'lazy',
+    is  => 'lazy',
     isa => Int,
   );
 
   sub _build__max_frames
   {
-    my $self = shift;
-    my $pcm = $self->pcm;
-    my $duration = ( length($pcm) / 2) / $self->VPR->sample_rate;
+    my $self       = shift;
+    my $pcm        = $self->pcm;
+    my $duration   = ( length($pcm) / 2 ) / $self->VPR->sample_rate;
     my $frame_rate = $self->VPR->frame_rate;
-    return int($duration * $frame_rate);
+    return int( $duration * $frame_rate );
   }
 
   sub _build__max_iframes
   {
-    my $self = shift;
-    my $pcm = $self->pcm;
-    my $duration = ( length($pcm) / 2) / $self->VPR->sample_rate;
-    my $fps = $self->VPR->fps;
-    return int($duration * $fps);
+    my $self     = shift;
+    my $pcm      = $self->pcm;
+    my $duration = ( length($pcm) / 2 ) / $self->VPR->sample_rate;
+    my $fps      = $self->VPR->fps;
+    return int( $duration * $fps );
   }
 
   sub png_frame
@@ -308,20 +328,20 @@ package Video::ProjectM::Render::Stream
     my $self = shift;
 
     my $vpr = $self->VPR;
-    my $v = $vpr->_vizual;
+    my $v   = $vpr->_vizual;
 
-    my $pcm = $self->pcm;
-    my $frame = $self->_frame;
-    my $iframe = $self->_iframe;
-    my $fps = $vpr->fps;
-    my $afactor = $vpr->sample_rate / $vpr->frame_rate;
-    my $vfactor = $vpr->frame_rate / $fps;
+    my $pcm           = $self->pcm;
+    my $frame         = $self->_frame;
+    my $iframe        = $self->_iframe;
+    my $fps           = $vpr->fps;
+    my $afactor       = $vpr->sample_rate / $vpr->frame_rate;
+    my $vfactor       = $vpr->frame_rate / $fps;
     my $total_iframes = $self->_max_iframes;
 
     return
-      if $frame >= $self->_max_frames;
+        if $frame >= $self->_max_frames;
 
-    $v->pcm(substr $pcm, int($afactor * $frame), int($afactor));
+    $v->pcm( substr $pcm, int( $afactor * $frame ), int($afactor) );
 
     while ( $iframe < $total_iframes )
     {
@@ -329,7 +349,7 @@ package Video::ProjectM::Render::Stream
       warn("$s\t$iframe\t$total_iframes\n");
 
       $v->render($s);
-      if ( int($iframe * $vfactor) != int(($iframe-1) * $vfactor) )
+      if ( int( $iframe * $vfactor ) != int( ( $iframe - 1 ) * $vfactor ) )
       {
         #$frame++;
         #$result = $v->png_frame;
@@ -342,8 +362,8 @@ package Video::ProjectM::Render::Stream
       $iframe++;
     }
 
-    $self->_set__frame(++$frame);
-    $self->_set__iframe(++$iframe);
+    $self->_set__frame( ++$frame );
+    $self->_set__iframe( ++$iframe );
     return $v->png_frame;
   }
 
@@ -352,7 +372,7 @@ package Video::ProjectM::Render::Stream
   sub close
   {
     my $self = shift;
-    $self->_set__frame($self->_max_frames);
+    $self->_set__frame( $self->_max_frames );
     return;
   }
 };
