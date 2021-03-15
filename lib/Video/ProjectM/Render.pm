@@ -381,14 +381,16 @@ use Config;
 
 use Inline CPP => Config => ccflags => ''
     . ' -std=c++11 -mavx -mavx2 '
-    . `pkg-config --cflags libprojectM osmesa libpng`
-    , libs => `pkg-config --libs libprojectM osmesa libpng`
+    . `pkg-config --cflags libprojectM osmesa libpng x11`
+    , libs => `pkg-config --libs libprojectM osmesa libpng x11`
     , auto_include => "#undef seed",
     ;
 use Inline CPP => <<'EOC';
 
 #include "GL/osmesa.h"
 #include "GL/gl.h"
+#include <GL/glx.h>
+#include <X11/Xlib.h>
 #include <libprojectM/projectM.hpp>
 #include <libprojectM/TimeKeeper.hpp>
 #undef do_open
@@ -431,43 +433,35 @@ class Viszul
   private:
    projectM* pm;
    TimeKeeperFixed* timekeeper;
-   OSMesaContext ctx;
    GLubyte* buffer;
    int fps = 30;
    int xw = 400;
    int yh = 400;
+
+   OSMesaContext ctx = NULL;
+
+   Display *d;
+   Window w;
+   GLXContext glx_ctx;
+
+   int initOSMesa();
+   int initGLX();
 };
 
 
 Viszul::Viszul(const char* config_file, char* preset, int xw, int yh, int fps)
   : preset(preset), xw(xw), yh(yh), fps(fps)
 {
-  OSMesaContext ctx;
-  GLubyte* buffer;
-
-  /* specify Z, stencil, accum sizes */
-  ctx = OSMesaCreateContextExt( OSMESA_RGB, 16, 0, 0, NULL );
-  if ( !ctx )
-  {
-    croak("OSMesaCreateContext failed!\n");
-  }
-
   /* Allocate the image buffer */
-  int buffsz = xw * yh * 3 * sizeof(GLubyte);
+  int buffsz = xw * yh * 4 * sizeof(GLubyte);
   buffer = (GLubyte*) malloc( buffsz );
   if ( !buffer )
   {
     croak("Alloc image buffer failed!\n");
   }
 
-  /* Bind the buffer to the context and make it current */
-  if ( !OSMesaMakeCurrent( ctx, buffer, GL_UNSIGNED_BYTE, xw, yh ) )
-  {
-    croak("OSMesaMakeCurrent failed!\n");
-  }
+  initGLX() || initOSMesa();
 
-  this->ctx = ctx;
-  this->buffer = buffer;
   pm = new projectM(config_file);
   if ( pm->timeKeeper != NULL )
   {
@@ -502,6 +496,113 @@ void Viszul::pcm(SV* pcm_sv)
   pm->pcm()->addPCMfloat(pcm_float, len );
 }
 
+int Viszul::initOSMesa()
+{
+  OSMesaContext ctx;
+
+  /* specify Z, stencil, accum sizes */
+  ctx = OSMesaCreateContextExt( OSMESA_RGB, 24, 8, 16, NULL );
+  if ( !ctx )
+  {
+    croak("OSMesaCreateContext failed!\n");
+  }
+
+  /* Bind the buffer to the context and make it current */
+  if ( !OSMesaMakeCurrent( ctx, buffer, GL_UNSIGNED_BYTE, xw, yh ) )
+  {
+    croak("OSMesaMakeCurrent failed!\n");
+  }
+
+  this->ctx = ctx;
+  return 1;
+}
+
+typedef GLXContext (*glXCreateContextAttribsARBProc) (Display*, GLXFBConfig, GLXContext, Bool, const int*);
+int Viszul::initGLX()
+{
+  d = XOpenDisplay(NULL);
+
+  if (!d)
+  {
+    return 0;
+  }
+
+  w = XCreateSimpleWindow(d, DefaultRootWindow(d),
+                            10, 10,
+                            xw, yh,
+                            0, 0,
+                            0
+                           );
+  static int visual_attribs[] = {
+        GLX_X_RENDERABLE,   True,
+        GLX_X_VISUAL_TYPE,  GLX_TRUE_COLOR,
+        None
+    };
+
+  int scrnum = DefaultScreen( d );
+  Window root = RootWindow( d, scrnum );
+
+  int num_fbc = 0;
+  GLXFBConfig *fbc = glXChooseFBConfig(d, scrnum, visual_attribs, &num_fbc);
+  if (!fbc)
+  {
+      return 0;
+  }
+
+  glXCreateContextAttribsARBProc glXCreateContextAttribsARB = (glXCreateContextAttribsARBProc) glXGetProcAddress((const GLubyte*)"glXCreateContextAttribsARB");
+
+  if (!glXCreateContextAttribsARB)
+  {
+    return 0;
+  }
+
+  static int context_attribs[] = { None };
+  glx_ctx = glXCreateNewContext( d, fbc[0], GLX_RGBA_TYPE, 0, True );
+  XFree( fbc );
+
+  if (!glx_ctx)
+  {
+    return 0;
+  }
+
+  warn("%s GLX rendering context obtained\n", glXIsDirect( d, glx_ctx ) ? "Direct" : "Indirect");
+
+  XMapWindow( d, w );
+  glXMakeCurrent(d, w, glx_ctx);
+
+  if ( glGetError() != GL_NO_ERROR )
+  {
+    while ( glGetError() != GL_NO_ERROR ) {};
+    warn("Got error, not using glx\n");
+    XUnmapWindow(d, w);
+    glXDestroyContext( d, glx_ctx );
+    glx_ctx = NULL;
+    w = 0;
+    return 0;
+  }
+
+  if ( glXGetCurrentContext() == NULL )
+  {
+    warn("Could not make ctx current, not using glx\n");
+    XUnmapWindow(d, w);
+    glx_ctx = NULL;
+    w = 0;
+    return 0;
+  }
+
+  glClearColor( 0.0, 0.0, 0.0, 0.0 );
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glXSwapBuffers( d, w );
+
+  printf("GL_RENDERER = %s\n", (char*)glGetString(GL_RENDERER));
+  printf("GL_VERSION = %s\n", (char*)glGetString(GL_VERSION));
+  printf("GL_VENDOR = %s\n", (char*)glGetString(GL_VENDOR));
+  printf("GL_SHADING_LANGUAGE_VERSION = %s\n", (char*)glGetString(GL_SHADING_LANGUAGE_VERSION));
+  printf("GL_EXTESIONS = %s\n", (char*)glGetString(GL_EXTENSIONS));
+
+  return 1;
+}
+
 void Viszul::render(double time)
 {
   glClearColor( 0.0, 0.0, 0.0, 0.0 );
@@ -520,17 +621,26 @@ SV* Viszul::png_frame()
   img.opaque = NULL;
   img.width = xw;
   img.height = yh;
-  img.format = PNG_FORMAT_BGR;
+  img.format = PNG_FORMAT_RGB;
 
   void *png_buffer = NULL;
   png_alloc_size_t png_len = xw * yh * 8;
   int res;
 
+  if ( glx_ctx != NULL )
+  {
+    glXSwapBuffers( d, w );
+  }
+
+  GLubyte* tmp_buffer = (GLubyte*) malloc(png_len);
+  glReadBuffer( GL_BACK );
+  glReadPixels(0, 0, xw, yh,  GL_RGB,  GL_UNSIGNED_BYTE, tmp_buffer);
+
   png_buffer = malloc(png_len);
   res = png_image_write_to_memory(
     &img, png_buffer, &png_len,
     0,        // convert_to_8_bit
-    buffer,
+    tmp_buffer,
     -PNG_IMAGE_ROW_STRIDE(img),       // row_stride
     NULL      // colormap
   );
@@ -573,7 +683,22 @@ void Viszul::save(FILE* fh)
 Viszul::~Viszul()
 {
   glFinish();
-  OSMesaDestroyContext( ctx );
+  if ( ctx != NULL )
+  {
+    OSMesaDestroyContext( ctx );
+  }
+  if ( glx_ctx != NULL )
+  {
+    glXDestroyContext( d, glx_ctx );
+  }
+  if ( w != NULL )
+  {
+    XUnmapWindow(d, w);
+  }
+  if ( d != NULL )
+  {
+    XCloseDisplay( d );
+  }
   free(buffer);
   delete(pm);
 }
@@ -581,3 +706,35 @@ Viszul::~Viszul()
 EOC
 
 1;
+
+__END__
+
+=encoding utf-8
+
+=head1 NAME
+
+Video::ProjectM::Render - Blah blah blah
+
+=head1 SYNOPSIS
+
+use Video::ProjectM::Render;
+
+=head1 DESCRIPTION
+
+Video::ProjectM::Render is
+
+=head1 AUTHOR
+
+Jon Gentle E<lt>cpan@atrodo.orgE<gt>
+
+=head1 COPYRIGHT
+
+Copyright 2021- Jon Gentle
+
+=head1 LICENSE
+
+This is free software. You may redistribute copies of it under the terms of the Artistic License 2 as published by The Perl Foundation.
+
+=head1 SEE ALSO
+
+=cut
