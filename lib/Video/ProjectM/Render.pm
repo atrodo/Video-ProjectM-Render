@@ -322,9 +322,9 @@ use Config;
 
 use Inline CPP => Config => ccflags => ''
     . ' -std=c++11 -mavx -mavx2 '
-    . `pkg-config --cflags libprojectM osmesa libpng x11`
-    , libs => `pkg-config --libs libprojectM osmesa libpng x11`
-    , auto_include => "#undef seed",
+    . `pkg-config --cflags libprojectM osmesa libpng x11`,
+    libs         => `pkg-config --libs libprojectM osmesa libpng x11`,
+    auto_include => "#undef seed",
     ;
 use Inline CPP => <<'EOC';
 
