@@ -438,9 +438,9 @@ class Viszul
 
    OSMesaContext ctx = NULL;
 
-   Display *d;
-   Window w;
-   GLXContext glx_ctx;
+   Display *d = NULL;
+   Window w = 0;
+   GLXContext glx_ctx = NULL;
 
    int initOSMesa();
    int initGLX();
@@ -534,6 +534,7 @@ int Viszul::initGLX()
                             0, 0,
                             0
                            );
+
   static int visual_attribs[] = {
         GLX_X_VISUAL_TYPE,  GLX_TRUE_COLOR,
         GLX_DOUBLEBUFFER,   True,
