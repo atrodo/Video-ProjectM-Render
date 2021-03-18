@@ -4,6 +4,7 @@ use Test::More;
 
 use Video::ProjectM::Render;
 
+local $ENV{DISPLAY} = '';
 my $pcm = pack 's<*', map { int( rand() * ( 2 << 8 ) ) } 0 .. 48_100;
 my $preset = '
 [preset00]

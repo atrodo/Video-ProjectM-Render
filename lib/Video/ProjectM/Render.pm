@@ -141,68 +141,12 @@ sub render
 
   open my $bgc_fh, '+>', undef;
 
-  my $tempdir = tempdir;
-  my $config  = join(
-    "\n",
-    "FPS  = 35",
-    "Fullscreen  = false",
-    "Window Width  = 512",
-    "Window Height = 512",
-    "Easter Egg Parameter = 1",
-
-    "Hard Cut Sensitivity = 10",
-    "Aspect Correction = true",
-
-    "Preset Path = $tempdir",
-    "Title Font = Vera.ttf",
-    "Menu Font = VeraMono.ttf",
-  );
-
+  my $stream = $self->new_stream($pcm_data);
+  while ( my $png = $stream->getline )
   {
-    open my $config_fh, '>', "$tempdir/config";
-    $config_fh->print($config);
-    open my $viz_fh, '>', "$tempdir/viz.milk";
-    my $dotmilk = $self->preset;
-    $dotmilk =~ s/{(\w+)}/$vars->{$1}/ge;
-    $viz_fh->print($dotmilk);
-    mkdir "$tempdir/presets";
-    mkdir "$tempdir/textures";
+    $bgc_fh->print($png);
   }
 
-  my $v = Video::ProjectM::Render::Viszul->new(
-    "$tempdir/config", "viz.milk",
-    $self->xw, $self->yh, $self->frame_rate
-  );
-
-  my $frame         = 0;
-  my $iframe        = 0;
-  my $fps           = $self->fps;
-  my $afactor       = $self->sample_rate / $self->frame_rate;
-  my $vfactor       = $self->frame_rate / $fps;
-  my $duration      = ( length($pcm_data) / 2 ) / $self->sample_rate;
-  my $total_iframes = int( $duration * $fps );
-
-  $v->pcm( substr $pcm_data, int( $afactor * $frame ), int($afactor) );
-
-  while ( $iframe < $total_iframes )
-  {
-    my $s = $iframe / $fps;
-    warn("$s\t$iframe\t$total_iframes\n");
-
-    $v->render($s);
-    if ( int( $iframe * $vfactor ) != int( ( $iframe - 1 ) * $vfactor ) )
-    {
-      $frame++;
-      $v->save($bgc_fh);
-      $v->pcm( substr $pcm_data, int( $afactor * $frame ), int($afactor) );
-    }
-  }
-  continue
-  {
-    $iframe++;
-  }
-
-  warn $frame;
   $bgc_fh->seek( 0, 0 );
   return $bgc_fh;
 }
@@ -344,7 +288,6 @@ package Video::ProjectM::Render::Stream
     while ( $iframe < $total_iframes )
     {
       my $s = $iframe / $fps;
-      warn("$s\t$iframe\t$total_iframes\n");
 
       $v->render($s);
       if ( int( $iframe * $vfactor ) != int( ( $iframe - 1 ) * $vfactor ) )
@@ -472,6 +415,7 @@ Viszul::Viszul(const char* config_file, char* preset, int xw, int yh, int fps)
   pm->timeKeeper = timekeeper;
 
   unsigned int preset_idx = pm->getPresetIndex(this->preset);
+
   pm->selectPreset(preset_idx);
   pm->setPresetLock(true);
   pm->projectM_resetGL( xw, yh );
