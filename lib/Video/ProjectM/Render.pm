@@ -15,6 +15,8 @@ use Types::Standard qw/Num Int Str HashRef InstanceOf/;
 
 use namespace::clean;
 
+our $VERSION = '0.001';
+
 has sample_rate => (
   is      => 'ro',
   isa     => Int,
@@ -83,8 +85,6 @@ sub _build__vizual
 
   my $config = join(
     "\n",
-    "Mesh X  = 220",    # Width of PerPixel Equation mesh
-    "Mesh Y  = 125",    # Height of PerPixel Equation mesh
     "FPS  = 35",
     "Fullscreen  = false",
     "Window Width  = 512",
@@ -144,8 +144,6 @@ sub render
   my $tempdir = tempdir;
   my $config  = join(
     "\n",
-    "Mesh X  = 220",    # Width of PerPixel Equation mesh
-    "Mesh Y  = 125",    # Height of PerPixel Equation mesh
     "FPS  = 35",
     "Fullscreen  = false",
     "Window Width  = 512",
@@ -461,6 +459,9 @@ Viszul::Viszul(const char* config_file, char* preset, int xw, int yh, int fps)
   }
 
   initGLX() || initOSMesa();
+  glEnable(GL_MULTISAMPLE);
+  glEnable(GL_LINE_SMOOTH);
+  glEnable(GL_POINT_SMOOTH);
 
   pm = new projectM(config_file);
   if ( pm->timeKeeper != NULL )
@@ -534,8 +535,8 @@ int Viszul::initGLX()
                             0
                            );
   static int visual_attribs[] = {
-        GLX_X_RENDERABLE,   True,
         GLX_X_VISUAL_TYPE,  GLX_TRUE_COLOR,
+        GLX_DOUBLEBUFFER,   True,
         None
     };
 
@@ -547,6 +548,20 @@ int Viszul::initGLX()
   if (!fbc)
   {
       return 0;
+  }
+
+  for (int i = 0; i < num_fbc; i++)
+  {
+    int id, r, g, b, depth, db, sb, spls;
+    glXGetFBConfigAttrib(d, fbc[i], GLX_FBCONFIG_ID, &id);
+    glXGetFBConfigAttrib(d, fbc[i], GLX_RED_SIZE, &r);
+    glXGetFBConfigAttrib(d, fbc[i], GLX_GREEN_SIZE, &g);
+    glXGetFBConfigAttrib(d, fbc[i], GLX_BLUE_SIZE, &b);
+    glXGetFBConfigAttrib(d, fbc[i], GLX_BUFFER_SIZE, &depth);
+    glXGetFBConfigAttrib(d, fbc[i], GLX_DOUBLEBUFFER, &db);
+    glXGetFBConfigAttrib(d, fbc[i], GLX_SAMPLE_BUFFERS, &sb);
+    glXGetFBConfigAttrib(d, fbc[i], GLX_SAMPLES, &spls);
+    warn("%d\t%d.%d.%d\tDepth: %d\tDB: %d\t%d/%d\n", id, r, g, b, depth, db, sb, spls);
   }
 
   glXCreateContextAttribsARBProc glXCreateContextAttribsARB = (glXCreateContextAttribsARBProc) glXGetProcAddress((const GLubyte*)"glXCreateContextAttribsARB");
@@ -633,8 +648,9 @@ SV* Viszul::png_frame()
   }
 
   GLubyte* tmp_buffer = (GLubyte*) malloc(png_len);
-  glReadBuffer( GL_BACK );
+  glReadBuffer(GL_FRONT);
   glReadPixels(0, 0, xw, yh,  GL_RGB,  GL_UNSIGNED_BYTE, tmp_buffer);
+  glReadBuffer(GL_BACK);
 
   png_buffer = malloc(png_len);
   res = png_image_write_to_memory(
