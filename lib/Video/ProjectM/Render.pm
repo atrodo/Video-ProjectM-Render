@@ -11,7 +11,7 @@ use Scalar::Util qw/blessed/;
 use List::Util qw/first max min/;
 use Time::HiRes qw/time/;
 
-use Types::Standard qw/Num Int Str HashRef InstanceOf/;
+use Types::Standard qw/Num Int Str HashRef InstanceOf HasMethods/;
 
 use namespace::clean;
 
@@ -58,6 +58,16 @@ has yh => (
   is      => 'ro',
   isa     => Num,
   default => 360,
+);
+
+has remote_url => (
+  is  => 'ro',
+  isa => Str,
+);
+
+has remote_ua => (
+  is  => 'rw',
+  isa => HasMethods['request'],
 );
 
 has tempdir => (
@@ -139,6 +149,37 @@ sub render
     $self = $self->new( @new_options, vars => $vars );
   }
 
+  if ( defined $self->remote_url )
+  {
+    my $ua = $self->remote_ua;
+    if ( !defined $ua )
+    {
+      state $has_lwp = try { require LWP::UserAgent; 1; };
+      if ( $has_lwp )
+      {
+        $self->remote_ua(LWP::UserAgent->new);
+      }
+    }
+
+    if ( defined $ua )
+    {
+      require HTTP::Request::Common;
+      my $r = HTTP::Request::Common::GET($self->remote_url);
+
+      my $ua = $self->remote_ua;
+      if ( $ua->can('timeout') )
+      {
+        $ua->timeout(3);
+      }
+      my $res = $ua->request( $r );
+
+      if ( $res->is_success )
+      {
+        return $self->remote_render($pcm_data);
+      }
+    }
+  }
+
   open my $bgc_fh, '+>', undef;
 
   my $stream = $self->new_stream($pcm_data);
@@ -151,9 +192,47 @@ sub render
   return $bgc_fh;
 }
 
+sub remote_render
+{
+  my $self     = shift;
+  my $pcm_data = shift // die "pcm_data is required for remote_render";
+
+  die "remote_url is required for remote_render"
+    if !defined $self->remote_url;
+  die "remote_ua is required for remote_render"
+    if !defined $self->remote_ua;
+
+  require HTTP::Request::Common;
+
+  open my $bgc_fh, '+>', undef;
+
+  my $ua = $self->remote_ua;
+  my $r = HTTP::Request::Common::POST($self->remote_url,
+      Content_Type => 'form-data',
+      Content      => [
+    preset => [ undef, 'preset', Content => $self->preset ],
+    pcm    => [ undef, 'pcm',    Content => $pcm_data ],
+    frame_rate => $self->frame_rate,
+    fps        => $self->fps,
+    xw         => $self->xw,
+    yh         => $self->yh,
+      ]);
+
+  my $start = time;
+  my $res = $ua->request( $r, sub { $bgc_fh->print($_[0]) } );
+  my $end = time;
+
+  die "Could not fetch content"
+    if !$res->is_success;
+
+  warn Data::Dumper::Dumper(-s $bgc_fh, $end-$start, $res->headers);
+
+  $bgc_fh->seek( 0, 0 );
+  return $bgc_fh;
+}
+
 sub as_psgi
 {
-  require Plack::Builder;
   require Plack::Request;
   require Plack::Response;
   my $app = sub
@@ -161,6 +240,11 @@ sub as_psgi
     my $env = shift;
     my $req = Plack::Request->new($env);
     my $res = Plack::Response->new(500);
+
+    if ( $req->method eq 'GET' )
+    {
+      return Plack::Response->new(200)->finalize;
+    }
 
     try
     {
@@ -276,14 +360,15 @@ package Video::ProjectM::Render::Stream
     my $frame         = $self->_frame;
     my $iframe        = $self->_iframe;
     my $fps           = $vpr->fps;
-    my $afactor       = $vpr->sample_rate / $vpr->frame_rate;
+    my $afactor       = ($vpr->sample_rate / $vpr->frame_rate) * 2;
     my $vfactor       = $vpr->frame_rate / $fps;
     my $total_iframes = $self->_max_iframes;
 
     return
         if $frame >= $self->_max_frames;
 
-    $v->pcm( substr $pcm, int( $afactor * $frame ), int($afactor) );
+    my $pcm_piece = substr $pcm, int( $afactor * $frame ), int($afactor);
+    $v->pcm( $pcm_piece );
 
     while ( $iframe < $total_iframes )
     {
@@ -430,12 +515,22 @@ void Viszul::pcm(SV* pcm_sv)
   len = len >> 1;
   if ( len > 2048 )
   {
-    croak("Unable to load more than 2048 pcm samples, got %d\n", len);
+    croak("Unable to load more than 2048 pcm samples, got %d\n", (int)len);
   }
   float pcm_float[len];
+  float total = 0;
+  float min = 0;
+  float max = 0;
   for ( int i = 0; i < len; i++ )
   {
-    pcm_float[i] = (pcm[i] / bitmax);
+    pcm_float[i] = ((float)pcm[i] / bitmax);
+    min = pcm_float[i] < min ? pcm_float[i] : min;
+    max = pcm_float[i] > max ? pcm_float[i] : max;
+    total += pcm_float[i];
+  }
+  if ( max < 0.002 )
+  {
+    memset(&pcm_float, 0, len * sizeof(float));
   }
 
   pm->pcm()->addPCMfloat(pcm_float, len );

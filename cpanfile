@@ -9,10 +9,6 @@ requires 'Inline::C';
 requires 'Inline::CPP';
 
 recommends 'Plack::Builder';
-on 'test' => sub {
-  recommends 'HTTP::Request::Common';
-};
-
-recommends 'Plack::Builder';
+recommends 'HTTP::Request::Common';
 
 # vim:set filetype=perl:
