@@ -11,10 +11,14 @@ fDecay=0.500000
 nWaveMode=4
 ';
 
-my $pmr = Video::ProjectM::Render->new( preset => $preset );
+use Time::HiRes qw/time/;
+my $start = time;
+my $pmr = Video::ProjectM::Render->new( preset => $preset);
 
 my $fh = $pmr->render($pcm);
+my $end = time;
 
-is( ref $fh, 'GLOB', 'Render generated an output file' );
+note("Total time: " . ($end-$start));
+is(ref $fh, 'GLOB', 'Render generated an output file');
 
 done_testing;

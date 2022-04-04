@@ -12,7 +12,9 @@ fDecay=0.500000
 nWaveMode=4
 ';
 
-my $pmr = Video::ProjectM::Render->new( preset => $preset );
+use Time::HiRes qw/time/;
+my $start = time;
+my $pmr = Video::ProjectM::Render->new( preset => $preset);
 
 my $fh_like = $pmr->new_stream($pcm);
 
@@ -23,7 +25,9 @@ while ( my $png = $fh_like->getline )
   $bgc_fh->print($png);
   $frames++;
 }
+my $end = time;
 
-is( $frames, 32, 'Created all the expected frames' );
+note("Total time: " . ($end-$start));
+is($frames, 32, 'Created all the expected frames');
 
 done_testing;

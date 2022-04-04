@@ -6,12 +6,13 @@ use autodie;
 use Moo;
 use Try::Tiny;
 use autodie;
-use File::Temp qw/tempdir/;
+use File::Temp qw/tempdir tempfile/;
+use File::Basename qw/fileparse/;
 use Scalar::Util qw/blessed/;
 use List::Util qw/first max min/;
 use Time::HiRes qw/time/;
 
-use Types::Standard qw/Num Int Str HashRef InstanceOf HasMethods/;
+use Types::Standard qw/Num Int Str ArrayRef HashRef InstanceOf HasMethods Enum/;
 
 use namespace::clean;
 
@@ -63,6 +64,24 @@ has yh => (
 has remote_url => (
   is  => 'ro',
   isa => Str,
+);
+
+has ffmpeg_cmd => (
+  is      => 'ro',
+  isa     => Str,
+  default => 'ffmpeg',
+);
+
+has ffmpeg_args => (
+  is      => 'ro',
+  isa     => ArrayRef [Str],
+  default => sub { [] },
+);
+
+has format => (
+  is      => 'ro',
+  isa     => Enum [qw/png ogg mp4/],
+  default => 'png',
 );
 
 has remote_ua => (
@@ -128,12 +147,14 @@ sub _build__vizual
 
 sub new_stream
 {
-  my $self     = shift;
-  my $pcm_data = shift;
+  my $self           = shift;
+  my $pcm_data       = shift;
+  my $local_filename = shift;
 
   return Video::ProjectM::Render::Stream->new(
-    VPR => $self,
-    pcm => $pcm_data
+    VPR            => $self,
+    pcm            => $pcm_data,
+    local_filename => $local_filename // '',
   );
 }
 
@@ -179,6 +200,110 @@ sub render
       }
     }
   }
+
+  my $format = $self->format;
+
+  if ( $format eq 'png' )
+  {
+    return $self->png_render($pcm_data);
+  }
+
+  my $ffmpeg_cmd = $self->ffmpeg_cmd;
+  if ( !$ffmpeg_cmd || !-x $ffmpeg_cmd )
+  {
+    die "Cannot convert to $format without ffmpeg";
+  }
+
+  local $^F = 1024;
+  my $png_fh = $self->png_render($pcm_data);
+
+  return $self->render_png_fh( $png_fh, $pcm_data );
+}
+
+sub render_png_fh
+{
+  my $self     = shift;
+  my $png_fh   = shift;
+  my $pcm_data = shift;
+
+  $png_fh->seek( 0, 0 );
+
+  my $format = $self->format;
+  if ( $format eq 'png' )
+  {
+    return $png_fh;
+  }
+
+  my $ffmpeg_cmd = $self->ffmpeg_cmd;
+  if ( !$ffmpeg_cmd || !-x $ffmpeg_cmd )
+  {
+    die "Cannot convert to $format without ffmpeg";
+  }
+
+  local $^F = 1024;
+  open my $pcm_fh, '+>', undef;
+  $pcm_fh->print($pcm_data);
+  $pcm_fh->seek( 0, 0 );
+
+  my ( $fh, $filename ) = tempfile( "VRP_output_XXXXXXXX", delete => 0 );
+
+  my @ffmpeg = (
+    $ffmpeg_cmd,
+    $self->ffmpeg_args->@*,
+    '-y',
+    '-nostdin',
+
+    # Audio
+    '-f'         => 's16le',
+    '-ar'        => $self->sample_rate,
+    '-ac'        => 1,
+    '-blocksize' => '1024',
+    '-i'         => "pipe:" . fileno $pcm_fh,
+
+    # Video
+    '-framerate', $self->frame_rate,
+    '-f',         'image2pipe',
+    '-i',         "pipe:" . fileno $png_fh,
+  );
+
+  if ( $format eq 'ogg' )
+  {
+    push @ffmpeg, (
+      '-codec:v' => 'theora',
+      '-q:v'     => '8',
+      '-codec:a' => 'libvorbis',
+      '-q:a'     => '8',
+      '-f'       => 'ogg',
+    );
+  }
+
+  if ( $format eq 'mp4' )
+  {
+    push @ffmpeg, (
+      '-codec:v' => 'libx264',
+      '-q:v'     => '8',
+      '-codec:a' => 'aac',
+      '-q:a'     => '8',
+      '-f'       => 'mp4',
+    );
+  }
+  push @ffmpeg, $filename;
+
+  my $pid = fork // die "fork() failed: $!";
+  if ( $pid == 0 )
+  {
+    exec @ffmpeg;
+  }
+  waitpid $pid, 0;
+
+  $fh->seek( 0, 0 );
+  return $fh;
+}
+
+sub png_render
+{
+  my $self     = shift;
+  my $pcm_data = shift;
 
   open my $bgc_fh, '+>', undef;
 
@@ -248,9 +373,10 @@ sub as_psgi
 
     try
     {
-      my %vars   = $req->parameters->%*;
-      my $pcm    = delete $vars{pcm};
-      my $preset = delete $vars{preset};
+      my %vars     = $req->parameters->%*;
+      my $pcm      = delete $vars{pcm};
+      my $preset   = delete $vars{preset};
+      my $give_uri = delete $vars{uri};
 
       if ( !$pcm && $req->upload('pcm') )
       {
@@ -270,12 +396,50 @@ sub as_psgi
         fps        => delete $vars{fps},
         xw         => delete $vars{xw},
         yh         => delete $vars{yh},
-        vars       => delete $vars{vars} // \%vars,
+        format     => delete $vars{format} // 'png',
+        vars       => delete $vars{vars}   // \%vars,
       );
+      warn Data::Dumper::Dumper( $pmr->vars );
+
+      my $duration = ( length($pcm) / 2 ) / $pmr->sample_rate;
+      warn "Will render $duration seconds\n";
+
+      my $format = $pmr->format;
+      my $ct
+          = $format eq 'png' ? 'image/png'
+          : $format eq 'ogg' ? 'video/ogg'
+          : $format eq 'mp4' ? 'video/mp4'
+          :                    die "Not a valid format: $format";
+
+      my $output;
+
+      if ($give_uri)
+      {
+        $ct = 'text/uri-list';
+
+        my $filename = 'rendered_XXXXXXXX';
+        if ( length $give_uri > 1 )
+        {
+          ( $filename, undef, undef ) = fileparse( $give_uri, qr/\.[^.]*/ );
+          $filename = "$filename\_XXXXXXXX";
+        }
+        ( undef, $filename ) = tempfile($filename);
+        $output = $pmr->new_stream( $pcm, "$filename.$format" );
+      }
+      elsif ( $format eq 'png' )
+      {
+        $output = $pmr->new_stream($pcm);
+      }
+      else
+      {
+        $output = $pmr->render;
+      }
+
       $res = [
-        200, [ 'Content-Type' => 'image/png' ],
-        $pmr->new_stream($pcm)
+        200, [ 'Content-Type' => $ct ],
+        $output
       ];
+
     }
     catch
     {
@@ -291,9 +455,13 @@ sub as_psgi
 package Video::ProjectM::Render::Stream
 {
   use Moo;
-  use Types::Standard qw/Num Int Str InstanceOf/;
+  use Types::Standard qw/Num Int Str FileHandle InstanceOf/;
 
+  use autodie qw/mkdir/;
   use File::Temp qw/tempdir/;
+  use File::Copy qw/copy/;
+  use Time::HiRes qw/time/;
+  use Fatal qw/copy/;
 
   use namespace::clean;
 
@@ -307,6 +475,34 @@ package Video::ProjectM::Render::Stream
     is       => 'ro',
     isa      => Str,
     required => 1,
+  );
+
+  has format => (
+    is      => 'ro',
+    isa     => Str,
+    default => 'png',
+  );
+
+  has local_filename => (
+    is      => 'ro',
+    isa     => Str,
+    default => '',
+  );
+
+  has local_dir => (
+    is      => 'ro',
+    isa     => Str,
+    default => 'output/',
+  );
+
+  has _output_fh => (
+    is  => 'rwp',
+    isa => FileHandle,
+  );
+
+  has _getline_fn => (
+    is  => 'lazy',
+    isa => Str,
   );
 
   has _frame => (
@@ -349,6 +545,37 @@ package Video::ProjectM::Render::Stream
     return int( $duration * $fps );
   }
 
+  sub _build__getline_fn
+  {
+    my $self = shift;
+
+    my $format = $self->format;
+
+    if ( $format ne 'png' )
+    {
+      die "Cannot stream $format unless it is saved locally"
+          if !$self->local_filename;
+
+      my $ffmpeg_cmd = $self->VPR->ffmpeg_cmd;
+      if ( !$ffmpeg_cmd || !-x $ffmpeg_cmd )
+      {
+        die "Cannot convert to $format without ffmpeg";
+      }
+    }
+
+    if ( $self->local_filename )
+    {
+      local $^F = 1024;
+      open my $png_fh, '+>', undef;
+      $self->_set__output_fh($png_fh);
+      return "url_frame";
+    }
+
+    return "png_frame";
+
+    return "$format\_frame";
+  }
+
   sub png_frame
   {
     my $self = shift;
@@ -360,15 +587,20 @@ package Video::ProjectM::Render::Stream
     my $frame         = $self->_frame;
     my $iframe        = $self->_iframe;
     my $fps           = $vpr->fps;
-    my $afactor       = ($vpr->sample_rate / $vpr->frame_rate) * 2;
+    my $frame_rate    = $vpr->frame_rate;
+    my $afactor       = ( $vpr->sample_rate / $vpr->frame_rate ) * 2;
     my $vfactor       = $vpr->frame_rate / $fps;
     my $total_iframes = $self->_max_iframes;
 
     return
         if $frame >= $self->_max_frames;
 
+    if ( $frame % ( $frame_rate * 10 ) == 0 )
+    {
+      warn int( $frame / $frame_rate );
+    }
     my $pcm_piece = substr $pcm, int( $afactor * $frame ), int($afactor);
-    $v->pcm( $pcm_piece );
+    $v->pcm($pcm_piece);
 
     while ( $iframe < $total_iframes )
     {
@@ -393,12 +625,65 @@ package Video::ProjectM::Render::Stream
     return $v->png_frame;
   }
 
-  *getline = \&png_frame;
+  sub url_frame
+  {
+    my $self = shift;
+
+    my $result     = '';
+    my $frame      = $self->_frame;
+    my $frame_rate = $self->VPR->frame_rate;
+
+    if ( $frame == 0 )
+    {
+      $result .= "#";
+    }
+    elsif ( $frame % $frame_rate == 0 )
+    {
+      $result .= "\n#";
+    }
+
+    my $png_frame = $self->png_frame;
+    $result .= '.';
+
+    if ( !defined $png_frame )
+    {
+      return;
+    }
+
+    if ( $self->_frame >= $self->_max_frames )
+    {
+      $result .= "\n" . $self->local_filename . "\n";
+
+      if ( !-d $self->local_dir )
+      {
+        mkdir $self->local_dir;
+      }
+      my $fh = $self->VPR->render_png_fh( $self->_output_fh, $self->pcm );
+      copy( $fh, $self->local_dir . '/' . $self->local_filename );
+    }
+
+    $self->_output_fh->print($png_frame);
+
+    return $result;
+  }
+
+  sub getline
+  {
+    my $self = shift;
+    my $fn   = $self->_getline_fn;
+
+    return $self->$fn(@_);
+  }
+
+  has _start_time => ( is => 'ro', default => sub {time} );
 
   sub close
   {
     my $self = shift;
     $self->_set__frame( $self->_max_frames );
+
+    my $n = time - $self->_start_time;
+    warn "Took $n time\n";
     return;
   }
 };
@@ -407,20 +692,20 @@ use Config;
 
 use Inline CPP => Config => ccflags => ''
     . ' -std=c++11 -mavx -mavx2 '
-    . `pkg-config --cflags libprojectM osmesa libpng x11`,
-    libs         => `pkg-config --libs libprojectM osmesa libpng x11`,
+    . `pkg-config --cflags libprojectM osmesa libpng x11 gl`,
+    libs         => `pkg-config --libs libprojectM osmesa libpng x11 gl`,
     auto_include => "#undef seed",
     ;
 use Inline CPP => <<'EOC';
 
+#undef do_open
+#undef do_close
 #include "GL/osmesa.h"
 #include "GL/gl.h"
 #include <GL/glx.h>
 #include <X11/Xlib.h>
 #include <libprojectM/projectM.hpp>
-#include <libprojectM/TimeKeeper.hpp>
-#undef do_open
-#undef do_close
+#include <libprojectM/event.h>
 
 extern "C" {
 #include <png.h>
@@ -429,21 +714,6 @@ extern "C" {
 #include "perl.h"
 #include "XSUB.h"
 #include "INLINE.h"
-}
-
-class TimeKeeperFixed : public TimeKeeper
-{
-  public:
-    using TimeKeeper::TimeKeeper;
-    double fixed_time;
-    void UpdateTimers() override;
-};
-
-void TimeKeeperFixed::UpdateTimers()
-{
-  _currentTime = fixed_time;
-  _presetFrameA++;
-  _presetFrameB++;
 }
 
 class Viszul
@@ -458,7 +728,6 @@ class Viszul
     ~Viszul();
   private:
    projectM* pm;
-   TimeKeeperFixed* timekeeper;
    GLubyte* buffer;
    int fps = 30;
    int xw = 400;
@@ -488,22 +757,22 @@ Viszul::Viszul(const char* config_file, char* preset, int xw, int yh, int fps)
 
   initGLX() || initOSMesa();
   glEnable(GL_MULTISAMPLE);
+  glEnable(GL_BLEND);
   glEnable(GL_LINE_SMOOTH);
   glEnable(GL_POINT_SMOOTH);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
   pm = new projectM(config_file);
-  if ( pm->timeKeeper != NULL )
-  {
-    delete pm->timeKeeper;
-  }
-  timekeeper = new TimeKeeperFixed(pm->_settings.presetDuration,pm->_settings.smoothPresetDuration, pm->_settings.hardcutDuration, pm->_settings.easterEgg);
-  pm->timeKeeper = timekeeper;
 
   unsigned int preset_idx = pm->getPresetIndex(this->preset);
 
   pm->selectPreset(preset_idx);
   pm->setPresetLock(true);
   pm->projectM_resetGL( xw, yh );
+  pm->key_handler(PROJECTM_KEYDOWN, PROJECTM_K_F5, PROJECTM_KMOD_NONE);
+  pm->key_handler(PROJECTM_KEYUP, PROJECTM_K_F5, PROJECTM_KMOD_NONE);
+  pm->key_handler(PROJECTM_KEYDOWN, PROJECTM_K_F4, PROJECTM_KMOD_NONE);
+  pm->key_handler(PROJECTM_KEYUP, PROJECTM_K_F4, PROJECTM_KMOD_NONE);
 }
 
 void Viszul::pcm(SV* pcm_sv)
@@ -653,7 +922,6 @@ int Viszul::initGLX()
   printf("GL_VERSION = %s\n", (char*)glGetString(GL_VERSION));
   printf("GL_VENDOR = %s\n", (char*)glGetString(GL_VENDOR));
   printf("GL_SHADING_LANGUAGE_VERSION = %s\n", (char*)glGetString(GL_SHADING_LANGUAGE_VERSION));
-  printf("GL_EXTESIONS = %s\n", (char*)glGetString(GL_EXTENSIONS));
 
   return 1;
 }
@@ -663,7 +931,7 @@ void Viszul::render(double time)
   glClearColor( 0.0, 0.0, 0.0, 0.0 );
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-  timekeeper->fixed_time = time;
+  pm->setNextFrameTime(time);
   pm->renderFrame();
 }
 
